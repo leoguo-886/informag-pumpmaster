@@ -1,0 +1,139 @@
+trigger:
+  branches:
+    include:
+      - main
+
+# Variables are saved in Azure DevOps, this pipeline covers both backend and frontend deployments.
+# This pipeline uses in Staging environment as it trigger by main branch.
+# It can be used for testing before deploying to production.
+
+variables:
+  azureSubscription: 'Subscription'
+  appName: 'pumpmaster-api'
+  frontendAppName: 'pumpmaster-frontend'
+  resourceGroup: 'pumpmaster-rg'
+  slotBlue: 'blue'
+  slotGreen: 'green'
+
+stages:
+- stage: Build_Backend
+  displayName: 'Build Backend (.NET API)'
+  jobs:
+  - job: BuildBackend
+    steps:
+    - task: UseDotNet@2
+      inputs:
+        packageType: 'sdk'
+        version: '8.x'
+    - script: dotnet build --configuration Release
+    - script: dotnet publish -c Release -o $(Build.ArtifactStagingDirectory)
+    - publish: $(Build.ArtifactStagingDirectory)
+      artifact: backend-drop
+
+- stage: Build_Frontend
+  displayName: 'Build Frontend (React/Vue/Flutter)'
+  jobs:
+  - job: BuildFrontend
+    steps:
+    - script: |
+        cd frontend
+        # Install dependencies for React/Vue/Bootstrap/jQuery
+        npm install
+        # Build for React/Vue
+        npm run build
+        # For Flutter web, use: flutter build web
+      displayName: 'Build Frontend'
+    - publish: frontend/build
+      artifact: frontend-drop
+
+- stage: Deploy_Backend
+  displayName: 'Deploy Backend (Blue/Green)'
+  dependsOn: Build_Backend
+  jobs:
+  - deployment: DeployBackend
+    environment: 'production'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: backend-drop
+          - task: AzureWebApp@1
+            displayName: 'Deploy Backend to Green Slot'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              appName: $(appName)
+              resourceGroupName: $(resourceGroup)
+              slotName: $(slotGreen)
+              package: $(Pipeline.Workspace)/backend-drop
+          - script: |
+              # Health check
+              curl -f https://$(appName)-$(slotGreen).azurewebsites.net/health || exit 1
+            displayName: 'Health Check on Backend Green Slot'
+          - script: |
+              echo "Health check failed! Notifying DevOps engineer..."
+              # Example: Send an email or Teams message (replace with your notification method)
+              # az logic workflow run --name <logicAppName> --resource-group <resourceGroup> --parameters ...
+            displayName: 'Notify DevOps Engineer on Failure'
+            condition: failed()
+          - script: |
+              az webapp deployment slot swap \
+                --resource-group $(resourceGroup) \
+                --name $(appName) \
+                --slot $(slotGreen) \
+                --target-slot $(slotBlue)
+            displayName: 'Swap Backend Green with Blue'
+          - task: AzureCLI@2
+            displayName: 'Backend Rollback if needed'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                # Add backend rollback logic here if health checks fail
+
+- stage: Deploy_Frontend
+  displayName: 'Deploy Frontend (Blue/Green)'
+  dependsOn: Build_Frontend
+  jobs:
+  - deployment: DeployFrontend
+    environment: 'production'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: frontend-drop
+          - task: AzureWebApp@1
+            displayName: 'Deploy Frontend to Green Slot'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              appName: $(frontendAppName)
+              resourceGroupName: $(resourceGroup)
+              slotName: $(slotGreen)
+              package: $(Pipeline.Workspace)/frontend-drop
+          - script: |
+              # Health check
+              curl -f https://$(frontendAppName)-$(slotGreen).azurewebsites.net/health || exit 1
+            displayName: 'Health Check on Frontend Green Slot'
+          - script: |
+              echo "Health check failed! Notifying DevOps engineer..."
+              # Example: Send an email or Teams message (replace with your notification method)
+              # az logic workflow run --name <logicAppName> --resource-group <resourceGroup> --parameters ...
+            displayName: 'Notify DevOps Engineer on Failure'
+            condition: failed()
+          - script: |
+              az webapp deployment slot swap \
+                --resource-group $(resourceGroup) \
+                --name $(frontendAppName) \
+                --slot $(slotGreen) \
+                --target-slot $(slotBlue)
+            displayName: 'Swap Frontend Green with Blue'
+          - task: AzureCLI@2
+            displayName: 'Frontend Rollback if needed'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                # Add frontend rollback logic here if health checks fail
